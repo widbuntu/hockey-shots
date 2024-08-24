@@ -1,0 +1,1089 @@
+---
+title: "Analyzing Shot Characteristics"
+author: "Tyler Widdison"
+format: pdf
+editor: visual
+---
+
+<div>
+
+## Analyzing Shot Data 2007-2022 {style="text-align: center;"}
+
+</div>
+
+<div>
+
+### Introduction {style="text-align: center;"}
+
+</div>
+
+This research focuses on shot characteristics to identify and understand how different variables impact expected goals (Xg) models. The aim is to gain insights and identify the workings of a Xg model.
+
+I used data from moneypuck.com. Originally I was going to use the R package, hockeyR - <https://github.com/danmorse314/hockeyR>, but after using and reviewing I found errors in the play by play (wrong player scoring a goal and wrong assist player) when comparing to video. So I nixed that package. I was really interested in assists so I web scraped all the possible play-by-play from NHLE API (using Rust async, it worked like a dream) however after getting all the data I needed I realized it didn't provide the assist data I had hoped for. In the end I decided to go with <https://moneypuck.com/data.htm> shot collection 2007-2022. I thought this data set of 15 years would prove very useful for what I set out to do - getting a deeper understanding of Xg models in Hockey.
+
+For reference, the model utilized by moneypuck.com can be reviewed at [moneypuck.com/about.htm](https://moneypuck.com/about.htm). To mitigate the influence of outliers I appled the following filters:
+
+-   Home team skaters and Away team are equal to each other (3vs3, 4vs4, 5vs5 etc).
+
+-   Shots directed toward the goal only - No penalty shots.
+
+-   Coordinates 0,0 are filtered out.
+
+------------------------------------------------------------------------
+
+<div>
+
+### Data Description {style="text-align: center;"}
+
+</div>
+
+The dataset includes key variables such as XY shot location, shot angle, shot distance, shooter time on ice, shot round, shot type, and shooting hand. The primary focus is on understanding how these variables influence the likelihood of a shot resulting in a goal.
+
+The analysis involves a straightforward examination of each variable, followed by the application of a Random Forest model to evaluate the impact of each variable on goal-scoring probability. Additionally, heat maps are used to explore potential differences in the dataset when considering shots from grouped years. Note that not all variables provided by moneypuck.com were used in this study. You can see them all here: [https://peter-tanner.com/moneypuck/downloads/MoneyPuck_Shot_Data_Dictionary.csv](https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://peter-tanner.com/moneypuck/downloads/MoneyPuck_Shot_Data_Dictionary.csv&ved=2ahUKEwiRq4bR3YyIAxVKHEQIHdfhA1sQFnoECC8QAQ&usg=AOvVaw2vHIZGo4vyMa61ZIshUpwr)
+
+The data pre-processing steps are as follows:
+
+<div>
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(gt)
+library(tidyr)
+
+#Read the data
+shots <- readr::read_csv('https://peter-tanner.com/moneypuck/downloads/shots_2007-2022.zip') 
+
+# Data wrangling
+df <- shots |> 
+    dplyr::mutate(shooterLeftRight = ifelse(shooterLeftRight == 'R', 'Right', 'Left'),
+                  combo_coord = paste0(xCordAdjusted, yCordAdjusted), # To remove the 0,0 coordiantes
+                  shooterLeftRight = factor(shooterLeftRight),
+                  season = as.integer(season)
+                  ) |> 
+    # I only wanted to look at the shots which were on the goal and remove any NA variables
+    dplyr::filter(shotWasOnGoal == 1 & !is.na(shotType) & !is.na(shooterLeftRight) & combo_coord != '00' & awaySkatersOnIce == homeSkatersOnIce) |> 
+    # To keep my exploration simple I selected on the columns I wanted to focus on
+    dplyr::select(
+        'shotType',
+        'game_id',
+        'season',
+        'isHomeTeam',
+        'shotOnEmptyNet',
+        'xCordAdjusted',
+        'yCordAdjusted',
+        'shotRush',
+        'shotAngle',
+        'shotAnglePlusRebound',
+        'shotAngleReboundRoyalRoad',
+        'shotDistance',
+        'shotAnglePlusReboundSpeed',
+        'shotRebound',
+        'shooterLeftRight',
+        'shotGeneratedRebound',
+        'shooterTimeOnIce',
+        'goal'
+        )
+
+```
+
+</div>
+
+------------------------------------------------------------------------
+
+::: {style="text-align: center;"}
+### Summary of the data set
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+df |> 
+    dplyr::group_by(season) |> 
+    dplyr::summarise('Number of games' = n_distinct(game_id),
+                     'Number of shots' = n(),
+                     'Number of goals' = sum(goal == 1),
+                     .groups = 'drop') |> 
+    janitor::adorn_totals() |> 
+    dplyr::filter(season == 'Total') |> 
+    gt::gt() |> 
+    gt::cols_label(season = ("Season"))
+```
+:::
+
+------------------------------------------------------------------------
+
+<div>
+
+### Analysis of shots {style="text-align: center;"}
+
+</div>
+
+------------------------------------------------------------------------
+
+#### Shot on Goal Attempts - Entire data set {style="text-align: center;"}
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dd <- df |> 
+    dplyr::rename(x = xCordAdjusted, y = yCordAdjusted) |> 
+    dplyr::group_by(x, y) |> 
+    dplyr::summarise(goal = sum(goal == 1),
+              n = n(),
+              .groups = 'drop')
+
+NHL_red <- "#FFCCD8"
+NHL_blue <- "#CCE1FF"
+NHL_light_blue <- "#CCF5FF"
+ggplot() + 
+    ggplot2::geom_tile(data = dd, aes(x = x, y = y, fill = n), alpha = 0.7) +
+    ggplot2::geom_density_2d(data = dd |> tidyr::uncount(n), ggplot2::aes(x = x, y = y), color = "black", alpha = 0.5) +
+    ggplot2::scale_fill_gradientn(colors = c("#F8766D", "red", "white", "#00BFC4")) +
+    ggplot2::theme(axis.text.x = element_blank(), axis.text.y = element_blank()) +
+    ggplot2::theme_minimal() + 
+    ggplot2::labs(fill = "Number of Shots", x = '', y = '') +
+    ggplot2::coord_cartesian(xlim = c(27, 100)) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(10.92, 11.08, 7.08, 6.92)), fill = NHL_red) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(-10.92, -11.08, -7.08, -6.92)), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 25.5, y = 0, width = 1, height = 85), fill = NHL_blue, alpha = .6) + 
+    ggplot2::geom_tile(aes(x = 89, y = 0, width = 2 / 12, height = 73.50), fill = NHL_red) + 
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5))) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = 14.5, start = pi / 2, end = 0, r = 28)) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = -14.5, start = pi, end = pi / 2, r = 28)) + 
+    ggplot2::geom_tile(aes(x = 90.67, y = 0, width = 3.33, height = 6), fill = "#E5E5E3") + 
+    ggplot2::geom_tile(aes(x = 86.75, y = 0, width = 4.5, height = 8), fill = NHL_light_blue, alpha = .6) +
+    ggforce::geom_arc_bar(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r0 = 4, r = 6), fill = NHL_light_blue, colour = NHL_light_blue, size = 1 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 86.75, y = -4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 86.75, y = 4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggforce::geom_arc(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r = 6), colour = NHL_red, size = 2 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 85, y = 3.75, width = 2 / 12, height = 0.42), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 85, y = -3.75, width = 2 / 12, height = 0.42), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 65, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Top-Right
+    ggplot2::geom_tile(aes(x = 73, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Bottom-Right
+    ggplot2::geom_tile(aes(x = 73, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggforce::geom_circle(aes(x0 = 69, y0 = 22, r = 15), colour = NHL_red, size = 2 / 12) + # Top-Right
+    ggforce::geom_circle(aes(x0 = 69, y0 = -22, r = 15), colour = NHL_red, size = 2 / 12) + # Bottom-Right
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(42.5, 42.5))) + # Top
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(-42.5, -42.5))) + # Bottom
+    ggplot2::geom_line(aes(x = c(-100, -100), y = c(-14.5, 14.5))) + # Left
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5)))
+```
+
+------------------------------------------------------------------------
+
+#### Shot on Goal Made - Entire data set {style="text-align: center;"}
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dd <- df |> 
+    dplyr::rename(x = xCordAdjusted, y = yCordAdjusted) |> 
+    dplyr::group_by(x, y) |> 
+    dplyr::summarise(goal = sum(goal == 1),
+              n = n(),
+              .groups = 'drop')
+
+NHL_red <- "#FFCCD8"
+NHL_blue <- "#CCE1FF"
+NHL_light_blue <- "#CCF5FF"
+ggplot() + 
+    ggplot2::geom_tile(data = dd, aes(x = x, y = y, fill = goal), alpha = 0.7) +
+    ggplot2::geom_density_2d(data = dd |> tidyr::uncount(goal), ggplot2::aes(x = x, y = y), color = "black", alpha = 0.5) +
+    ggplot2::scale_fill_gradientn(colors = c("#F8766D", "red", "white", "#00BFC4")) +
+    ggplot2::theme_minimal() + 
+    ggplot2::labs(fill = "Number of Goals", x = '', y = '') +
+    ggplot2::theme(axis.text.x = element_blank(), axis.text.y = element_blank()) +
+    ggplot2::coord_cartesian(xlim = c(27, 100)) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(10.92, 11.08, 7.08, 6.92)), fill = NHL_red) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(-10.92, -11.08, -7.08, -6.92)), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 25.5, y = 0, width = 1, height = 85), fill = NHL_blue, alpha = .6) + 
+    ggplot2::geom_tile(aes(x = 89, y = 0, width = 2 / 12, height = 73.50), fill = NHL_red) + 
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5))) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = 14.5, start = pi / 2, end = 0, r = 28)) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = -14.5, start = pi, end = pi / 2, r = 28)) + 
+    ggplot2::geom_tile(aes(x = 90.67, y = 0, width = 3.33, height = 6), fill = "#E5E5E3") + 
+    ggplot2::geom_tile(aes(x = 86.75, y = 0, width = 4.5, height = 8), fill = NHL_light_blue, alpha = .6) +
+    ggforce::geom_arc_bar(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r0 = 4, r = 6), fill = NHL_light_blue, colour = NHL_light_blue, size = 1 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 86.75, y = -4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 86.75, y = 4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggforce::geom_arc(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r = 6), colour = NHL_red, size = 2 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 85, y = 3.75, width = 2 / 12, height = 0.42), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 85, y = -3.75, width = 2 / 12, height = 0.42), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 65, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Top-Right
+    ggplot2::geom_tile(aes(x = 73, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Bottom-Right
+    ggplot2::geom_tile(aes(x = 73, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggforce::geom_circle(aes(x0 = 69, y0 = 22, r = 15), colour = NHL_red, size = 2 / 12) + # Top-Right
+    ggforce::geom_circle(aes(x0 = 69, y0 = -22, r = 15), colour = NHL_red, size = 2 / 12) + # Bottom-Right
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(42.5, 42.5))) + # Top
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(-42.5, -42.5))) + # Bottom
+    ggplot2::geom_line(aes(x = c(-100, -100), y = c(-14.5, 14.5))) + # Left
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5)))
+```
+
+------------------------------------------------------------------------
+
+<div>
+
+### Heat map of shot attempts over the years {style="text-align: center;"}
+
+</div>
+
+#### Shot on Goal Attempts - 2007-2010 {style="text-align: center;"}
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dd <- df |> 
+    dplyr::rename(x = xCordAdjusted, y = yCordAdjusted) |> 
+    dplyr::mutate(grouped_year = ifelse(season %in% c('2007', '2008', '2009', '2010'), '2007-2010', NA),
+                  grouped_year = ifelse(season %in% c('2011', '2012', '2013', '2014'), '2011-2014', grouped_year),
+                  grouped_year = ifelse(season %in% c('2015', '2016', '2017', '2018'), '2015-2018', grouped_year),
+                  grouped_year = ifelse(season %in% c('2019', '2020', '2021', '2022'), '2019-2022', grouped_year),
+                  ) |> 
+    dplyr::filter(grouped_year == '2007-2010') |> 
+    dplyr::group_by(x, y, grouped_year) |> 
+    dplyr::summarise(goal = sum(goal == 1),
+                     n = n(),
+                     .groups = 'drop')
+
+NHL_red <- "#FFCCD8"
+NHL_blue <- "#CCE1FF"
+NHL_light_blue <- "#CCF5FF"
+ggplot() + 
+    ggplot2::geom_tile(data = dd, aes(x = x, y = y, fill = n), alpha = 0.7) +
+    ggplot2::geom_density_2d(data = dd |> tidyr::uncount(n), ggplot2::aes(x = x, y = y), color = "black", alpha = 0.5) +
+    ggplot2::scale_fill_gradientn(colors = c("#F8766D", "red", "white", "#00BFC4")) +
+    ggplot2::theme_minimal() + 
+    ggplot2::labs(fill = "Number of Shots", x = '', y = '') +
+    ggplot2::theme(axis.text.x = element_blank(), axis.text.y = element_blank()) +
+    ggplot2::coord_cartesian(xlim = c(27, 100)) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(10.92, 11.08, 7.08, 6.92)), fill = NHL_red) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(-10.92, -11.08, -7.08, -6.92)), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 25.5, y = 0, width = 1, height = 85), fill = NHL_blue, alpha = .6) + 
+    ggplot2::geom_tile(aes(x = 89, y = 0, width = 2 / 12, height = 73.50), fill = NHL_red) + 
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5))) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = 14.5, start = pi / 2, end = 0, r = 28)) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = -14.5, start = pi, end = pi / 2, r = 28)) + 
+    ggplot2::geom_tile(aes(x = 90.67, y = 0, width = 3.33, height = 6), fill = "#E5E5E3") + 
+    ggplot2::geom_tile(aes(x = 86.75, y = 0, width = 4.5, height = 8), fill = NHL_light_blue, alpha = .6) +
+    ggforce::geom_arc_bar(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r0 = 4, r = 6), fill = NHL_light_blue, colour = NHL_light_blue, size = 1 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 86.75, y = -4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 86.75, y = 4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggforce::geom_arc(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r = 6), colour = NHL_red, size = 2 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 85, y = 3.75, width = 2 / 12, height = 0.42), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 85, y = -3.75, width = 2 / 12, height = 0.42), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 65, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Top-Right
+    ggplot2::geom_tile(aes(x = 73, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Bottom-Right
+    ggplot2::geom_tile(aes(x = 73, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggforce::geom_circle(aes(x0 = 69, y0 = 22, r = 15), colour = NHL_red, size = 2 / 12) + # Top-Right
+    ggforce::geom_circle(aes(x0 = 69, y0 = -22, r = 15), colour = NHL_red, size = 2 / 12) + # Bottom-Right
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(42.5, 42.5))) + # Top
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(-42.5, -42.5))) + # Bottom
+    ggplot2::geom_line(aes(x = c(-100, -100), y = c(-14.5, 14.5))) + # Left
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5)))
+```
+
+------------------------------------------------------------------------
+
+#### Shot on Goal Attempts - 2011-2014 {style="text-align: center;"}
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dd <- df |> 
+    dplyr::rename(x = xCordAdjusted, y = yCordAdjusted) |> 
+    dplyr::mutate(grouped_year = ifelse(season %in% c('2007', '2008', '2009', '2010'), '2007-2010', NA),
+                  grouped_year = ifelse(season %in% c('2011', '2012', '2013', '2014'), '2011-2014', grouped_year),
+                  grouped_year = ifelse(season %in% c('2015', '2016', '2017', '2018'), '2015-2018', grouped_year),
+                  grouped_year = ifelse(season %in% c('2019', '2020', '2021', '2022'), '2019-2022', grouped_year),
+                  ) |> 
+    dplyr::filter(grouped_year == '2011-2014') |> 
+    dplyr::group_by(x, y, grouped_year) |> 
+    dplyr::summarise(goal = sum(goal == 1),
+                     n = n(),
+                     .groups = 'drop')
+
+NHL_red <- "#FFCCD8"
+NHL_blue <- "#CCE1FF"
+NHL_light_blue <- "#CCF5FF"
+ggplot() + 
+    ggplot2::geom_tile(data = dd, aes(x = x, y = y, fill = n), alpha = 0.7) +
+    ggplot2::geom_density_2d(data = dd |> tidyr::uncount(n), ggplot2::aes(x = x, y = y), color = "black", alpha = 0.5) +
+    ggplot2::scale_fill_gradientn(colors = c("#F8766D", "red", "white", "#00BFC4")) +
+    ggplot2::theme_minimal() + 
+    ggplot2::labs(fill = "Number of Shots", x = '', y = '') +
+    ggplot2::theme(axis.text.x = element_blank(), axis.text.y = element_blank()) +
+    ggplot2::coord_cartesian(xlim = c(27, 100)) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(10.92, 11.08, 7.08, 6.92)), fill = NHL_red) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(-10.92, -11.08, -7.08, -6.92)), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 25.5, y = 0, width = 1, height = 85), fill = NHL_blue, alpha = .6) + 
+    ggplot2::geom_tile(aes(x = 89, y = 0, width = 2 / 12, height = 73.50), fill = NHL_red) + 
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5))) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = 14.5, start = pi / 2, end = 0, r = 28)) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = -14.5, start = pi, end = pi / 2, r = 28)) + 
+    ggplot2::geom_tile(aes(x = 90.67, y = 0, width = 3.33, height = 6), fill = "#E5E5E3") + 
+    ggplot2::geom_tile(aes(x = 86.75, y = 0, width = 4.5, height = 8), fill = NHL_light_blue, alpha = .6) +
+    ggforce::geom_arc_bar(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r0 = 4, r = 6), fill = NHL_light_blue, colour = NHL_light_blue, size = 1 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 86.75, y = -4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 86.75, y = 4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggforce::geom_arc(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r = 6), colour = NHL_red, size = 2 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 85, y = 3.75, width = 2 / 12, height = 0.42), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 85, y = -3.75, width = 2 / 12, height = 0.42), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 65, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Top-Right
+    ggplot2::geom_tile(aes(x = 73, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Bottom-Right
+    ggplot2::geom_tile(aes(x = 73, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggforce::geom_circle(aes(x0 = 69, y0 = 22, r = 15), colour = NHL_red, size = 2 / 12) + # Top-Right
+    ggforce::geom_circle(aes(x0 = 69, y0 = -22, r = 15), colour = NHL_red, size = 2 / 12) + # Bottom-Right
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(42.5, 42.5))) + # Top
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(-42.5, -42.5))) + # Bottom
+    ggplot2::geom_line(aes(x = c(-100, -100), y = c(-14.5, 14.5))) + # Left
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5)))
+```
+
+------------------------------------------------------------------------
+
+#### Shot on Goal Attempts - 2015-2018 {style="text-align: center;"}
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dd <- df |> 
+    dplyr::rename(x = xCordAdjusted, y = yCordAdjusted) |> 
+    dplyr::mutate(grouped_year = ifelse(season %in% c('2007', '2008', '2009', '2010'), '2007-2010', NA),
+                  grouped_year = ifelse(season %in% c('2011', '2012', '2013', '2014'), '2011-2014', grouped_year),
+                  grouped_year = ifelse(season %in% c('2015', '2016', '2017', '2018'), '2015-2018', grouped_year),
+                  grouped_year = ifelse(season %in% c('2019', '2020', '2021', '2022'), '2019-2022', grouped_year),
+                  ) |> 
+    dplyr::filter(grouped_year == '2015-2018') |> 
+    dplyr::group_by(x, y, grouped_year) |> 
+    dplyr::summarise(goal = sum(goal == 1),
+                     n = n(),
+                     .groups = 'drop')
+
+NHL_red <- "#FFCCD8"
+NHL_blue <- "#CCE1FF"
+NHL_light_blue <- "#CCF5FF"
+ggplot() + 
+    ggplot2::geom_tile(data = dd, aes(x = x, y = y, fill = n), alpha = 0.7) +
+    ggplot2::geom_density_2d(data = dd |> tidyr::uncount(n), ggplot2::aes(x = x, y = y), color = "black", alpha = 0.5) +
+    ggplot2::scale_fill_gradientn(colors = c("#F8766D", "red", "white", "#00BFC4")) +
+    ggplot2::theme_minimal() + 
+    ggplot2::labs(fill = "Number of Shots", x = '', y = '') +
+    ggplot2::theme(axis.text.x = element_blank(), axis.text.y = element_blank()) +
+    ggplot2::coord_cartesian(xlim = c(27, 100)) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(10.92, 11.08, 7.08, 6.92)), fill = NHL_red) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(-10.92, -11.08, -7.08, -6.92)), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 25.5, y = 0, width = 1, height = 85), fill = NHL_blue, alpha = .6) + 
+    ggplot2::geom_tile(aes(x = 89, y = 0, width = 2 / 12, height = 73.50), fill = NHL_red) + 
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5))) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = 14.5, start = pi / 2, end = 0, r = 28)) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = -14.5, start = pi, end = pi / 2, r = 28)) + 
+    ggplot2::geom_tile(aes(x = 90.67, y = 0, width = 3.33, height = 6), fill = "#E5E5E3") + 
+    ggplot2::geom_tile(aes(x = 86.75, y = 0, width = 4.5, height = 8), fill = NHL_light_blue, alpha = .6) +
+    ggforce::geom_arc_bar(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r0 = 4, r = 6), fill = NHL_light_blue, colour = NHL_light_blue, size = 1 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 86.75, y = -4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 86.75, y = 4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggforce::geom_arc(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r = 6), colour = NHL_red, size = 2 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 85, y = 3.75, width = 2 / 12, height = 0.42), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 85, y = -3.75, width = 2 / 12, height = 0.42), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 65, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Top-Right
+    ggplot2::geom_tile(aes(x = 73, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Bottom-Right
+    ggplot2::geom_tile(aes(x = 73, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggforce::geom_circle(aes(x0 = 69, y0 = 22, r = 15), colour = NHL_red, size = 2 / 12) + # Top-Right
+    ggforce::geom_circle(aes(x0 = 69, y0 = -22, r = 15), colour = NHL_red, size = 2 / 12) + # Bottom-Right
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(42.5, 42.5))) + # Top
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(-42.5, -42.5))) + # Bottom
+    ggplot2::geom_line(aes(x = c(-100, -100), y = c(-14.5, 14.5))) + # Left
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5)))
+```
+
+------------------------------------------------------------------------
+
+#### Shot on Goal Attempts - 2019-2022 {style="text-align: center;"}
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dd <- df |> 
+    dplyr::rename(x = xCordAdjusted, y = yCordAdjusted) |> 
+    dplyr::mutate(grouped_year = ifelse(season %in% c('2007', '2008', '2009', '2010'), '2007-2010', NA),
+                  grouped_year = ifelse(season %in% c('2011', '2012', '2013', '2014'), '2011-2014', grouped_year),
+                  grouped_year = ifelse(season %in% c('2015', '2016', '2017', '2018'), '2015-2018', grouped_year),
+                  grouped_year = ifelse(season %in% c('2019', '2020', '2021', '2022'), '2019-2022', grouped_year),
+                  ) |> 
+    dplyr::filter(grouped_year == '2019-2022') |> 
+    dplyr::group_by(x, y, grouped_year) |> 
+    dplyr::summarise(goal = sum(goal == 1),
+                     n = n(),
+                     .groups = 'drop')
+
+NHL_red <- "#FFCCD8"
+NHL_blue <- "#CCE1FF"
+NHL_light_blue <- "#CCF5FF"
+ggplot() + 
+    ggplot2::geom_tile(data = dd, aes(x = x, y = y, fill = n), alpha = 0.7) +
+    ggplot2::geom_density_2d(data = dd |> tidyr::uncount(n), ggplot2::aes(x = x, y = y), color = "black", alpha = 0.5) +
+    ggplot2::scale_fill_gradientn(colors = c("#F8766D", "red", "white", "#00BFC4")) +
+    ggplot2::theme_minimal() + 
+    ggplot2::labs(fill = "Number of Shots", x = '', y = '') +
+    ggplot2::theme(axis.text.x = element_blank(), axis.text.y = element_blank()) +    
+    ggplot2::coord_cartesian(xlim = c(27, 100)) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(10.92, 11.08, 7.08, 6.92)), fill = NHL_red) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(-10.92, -11.08, -7.08, -6.92)), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 25.5, y = 0, width = 1, height = 85), fill = NHL_blue, alpha = .6) + 
+    ggplot2::geom_tile(aes(x = 89, y = 0, width = 2 / 12, height = 73.50), fill = NHL_red) + 
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5))) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = 14.5, start = pi / 2, end = 0, r = 28)) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = -14.5, start = pi, end = pi / 2, r = 28)) + 
+    ggplot2::geom_tile(aes(x = 90.67, y = 0, width = 3.33, height = 6), fill = "#E5E5E3") + 
+    ggplot2::geom_tile(aes(x = 86.75, y = 0, width = 4.5, height = 8), fill = NHL_light_blue, alpha = .6) +
+    ggforce::geom_arc_bar(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r0 = 4, r = 6), fill = NHL_light_blue, colour = NHL_light_blue, size = 1 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 86.75, y = -4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 86.75, y = 4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggforce::geom_arc(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r = 6), colour = NHL_red, size = 2 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 85, y = 3.75, width = 2 / 12, height = 0.42), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 85, y = -3.75, width = 2 / 12, height = 0.42), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 65, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Top-Right
+    ggplot2::geom_tile(aes(x = 73, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Bottom-Right
+    ggplot2::geom_tile(aes(x = 73, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggforce::geom_circle(aes(x0 = 69, y0 = 22, r = 15), colour = NHL_red, size = 2 / 12) + # Top-Right
+    ggforce::geom_circle(aes(x0 = 69, y0 = -22, r = 15), colour = NHL_red, size = 2 / 12) + # Bottom-Right
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(42.5, 42.5))) + # Top
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(-42.5, -42.5))) + # Bottom
+    ggplot2::geom_line(aes(x = c(-100, -100), y = c(-14.5, 14.5))) + # Left
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5)))
+```
+
+------------------------------------------------------------------------
+
+### Heat map of goals made over the years {style="text-align: center;"}
+
+#### Shot on Goal Made - 2007-2010 {style="text-align: center;"}
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dd <- df |> 
+    dplyr::rename(x = xCordAdjusted, y = yCordAdjusted) |> 
+    dplyr::mutate(grouped_year = ifelse(season %in% c('2007', '2008', '2009', '2010'), '2007-2010', NA),
+                  grouped_year = ifelse(season %in% c('2011', '2012', '2013', '2014'), '2011-2014', grouped_year),
+                  grouped_year = ifelse(season %in% c('2015', '2016', '2017', '2018'), '2015-2018', grouped_year),
+                  grouped_year = ifelse(season %in% c('2019', '2020', '2021', '2022'), '2019-2022', grouped_year),
+                  ) |> 
+    dplyr::filter(grouped_year == '2007-2010') |> 
+    dplyr::group_by(x, y, grouped_year) |> 
+    dplyr::summarise(goal = sum(goal == 1),
+                     n = n(),
+                     .groups = 'drop')
+
+NHL_red <- "#FFCCD8"
+NHL_blue <- "#CCE1FF"
+NHL_light_blue <- "#CCF5FF"
+ggplot() + 
+    ggplot2::geom_tile(data = dd, aes(x = x, y = y, fill = goal), alpha = 0.7) +
+    ggplot2::geom_density_2d(data = dd |> tidyr::uncount(goal), ggplot2::aes(x = x, y = y), color = "black", alpha = 0.5) +
+    ggplot2::scale_fill_gradientn(colors = c("#F8766D", "red", "white", "#00BFC4")) +
+    ggplot2::theme_minimal() + 
+    ggplot2::labs(fill = "Number of Goals", x = '', y = '') +
+    ggplot2::theme(axis.text.x = element_blank(), axis.text.y = element_blank()) +
+    ggplot2::coord_cartesian(xlim = c(27, 100)) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(10.92, 11.08, 7.08, 6.92)), fill = NHL_red) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(-10.92, -11.08, -7.08, -6.92)), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 25.5, y = 0, width = 1, height = 85), fill = NHL_blue, alpha = .6) + 
+    ggplot2::geom_tile(aes(x = 89, y = 0, width = 2 / 12, height = 73.50), fill = NHL_red) + 
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5))) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = 14.5, start = pi / 2, end = 0, r = 28)) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = -14.5, start = pi, end = pi / 2, r = 28)) + 
+    ggplot2::geom_tile(aes(x = 90.67, y = 0, width = 3.33, height = 6), fill = "#E5E5E3") + 
+    ggplot2::geom_tile(aes(x = 86.75, y = 0, width = 4.5, height = 8), fill = NHL_light_blue, alpha = .6) +
+    ggforce::geom_arc_bar(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r0 = 4, r = 6), fill = NHL_light_blue, colour = NHL_light_blue, size = 1 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 86.75, y = -4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 86.75, y = 4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggforce::geom_arc(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r = 6), colour = NHL_red, size = 2 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 85, y = 3.75, width = 2 / 12, height = 0.42), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 85, y = -3.75, width = 2 / 12, height = 0.42), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 65, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Top-Right
+    ggplot2::geom_tile(aes(x = 73, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Bottom-Right
+    ggplot2::geom_tile(aes(x = 73, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggforce::geom_circle(aes(x0 = 69, y0 = 22, r = 15), colour = NHL_red, size = 2 / 12) + # Top-Right
+    ggforce::geom_circle(aes(x0 = 69, y0 = -22, r = 15), colour = NHL_red, size = 2 / 12) + # Bottom-Right
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(42.5, 42.5))) + # Top
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(-42.5, -42.5))) + # Bottom
+    ggplot2::geom_line(aes(x = c(-100, -100), y = c(-14.5, 14.5))) + # Left
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5)))
+```
+
+------------------------------------------------------------------------
+
+#### Shot on Goal Made - 2011-2014 {style="text-align: center;"}
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dd <- df |> 
+    dplyr::rename(x = xCordAdjusted, y = yCordAdjusted) |> 
+    dplyr::mutate(grouped_year = ifelse(season %in% c('2007', '2008', '2009', '2010'), '2007-2010', NA),
+                  grouped_year = ifelse(season %in% c('2011', '2012', '2013', '2014'), '2011-2014', grouped_year),
+                  grouped_year = ifelse(season %in% c('2015', '2016', '2017', '2018'), '2015-2018', grouped_year),
+                  grouped_year = ifelse(season %in% c('2019', '2020', '2021', '2022'), '2019-2022', grouped_year),
+                  ) |> 
+    dplyr::filter(grouped_year == '2011-2014') |> 
+    dplyr::group_by(x, y, grouped_year) |> 
+    dplyr::summarise(goal = sum(goal == 1),
+                     n = n(),
+                     .groups = 'drop')
+
+NHL_red <- "#FFCCD8"
+NHL_blue <- "#CCE1FF"
+NHL_light_blue <- "#CCF5FF"
+ggplot() + 
+    ggplot2::geom_tile(data = dd, aes(x = x, y = y, fill = goal), alpha = 0.7) +
+    ggplot2::geom_density_2d(data = dd |> tidyr::uncount(goal), ggplot2::aes(x = x, y = y), color = "black", alpha = 0.5) +
+    ggplot2::scale_fill_gradientn(colors = c("#F8766D", "red", "white", "#00BFC4")) +
+    ggplot2::theme_minimal() + 
+    ggplot2::labs(fill = "Number of Goals", x = '', y = '') +
+    ggplot2::theme(axis.text.x = element_blank(), axis.text.y = element_blank()) +
+    ggplot2::coord_cartesian(xlim = c(27, 100)) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(10.92, 11.08, 7.08, 6.92)), fill = NHL_red) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(-10.92, -11.08, -7.08, -6.92)), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 25.5, y = 0, width = 1, height = 85), fill = NHL_blue, alpha = .6) + 
+    ggplot2::geom_tile(aes(x = 89, y = 0, width = 2 / 12, height = 73.50), fill = NHL_red) + 
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5))) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = 14.5, start = pi / 2, end = 0, r = 28)) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = -14.5, start = pi, end = pi / 2, r = 28)) + 
+    ggplot2::geom_tile(aes(x = 90.67, y = 0, width = 3.33, height = 6), fill = "#E5E5E3") + 
+    ggplot2::geom_tile(aes(x = 86.75, y = 0, width = 4.5, height = 8), fill = NHL_light_blue, alpha = .6) +
+    ggforce::geom_arc_bar(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r0 = 4, r = 6), fill = NHL_light_blue, colour = NHL_light_blue, size = 1 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 86.75, y = -4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 86.75, y = 4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggforce::geom_arc(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r = 6), colour = NHL_red, size = 2 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 85, y = 3.75, width = 2 / 12, height = 0.42), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 85, y = -3.75, width = 2 / 12, height = 0.42), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 65, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Top-Right
+    ggplot2::geom_tile(aes(x = 73, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Bottom-Right
+    ggplot2::geom_tile(aes(x = 73, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggforce::geom_circle(aes(x0 = 69, y0 = 22, r = 15), colour = NHL_red, size = 2 / 12) + # Top-Right
+    ggforce::geom_circle(aes(x0 = 69, y0 = -22, r = 15), colour = NHL_red, size = 2 / 12) + # Bottom-Right
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(42.5, 42.5))) + # Top
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(-42.5, -42.5))) + # Bottom
+    ggplot2::geom_line(aes(x = c(-100, -100), y = c(-14.5, 14.5))) + # Left
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5)))
+```
+
+------------------------------------------------------------------------
+
+#### Shot on Goal Made - 2015-2018 {style="text-align: center;"}
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dd <- df |> 
+    dplyr::rename(x = xCordAdjusted, y = yCordAdjusted) |> 
+    dplyr::mutate(grouped_year = ifelse(season %in% c('2007', '2008', '2009', '2010'), '2007-2010', NA),
+                  grouped_year = ifelse(season %in% c('2011', '2012', '2013', '2014'), '2011-2014', grouped_year),
+                  grouped_year = ifelse(season %in% c('2015', '2016', '2017', '2018'), '2015-2018', grouped_year),
+                  grouped_year = ifelse(season %in% c('2019', '2020', '2021', '2022'), '2019-2022', grouped_year),
+                  ) |> 
+    dplyr::filter(grouped_year == '2015-2018') |> 
+    dplyr::group_by(x, y, grouped_year) |> 
+    dplyr::summarise(goal = sum(goal == 1),
+                     n = n(),
+                     .groups = 'drop')
+
+NHL_red <- "#FFCCD8"
+NHL_blue <- "#CCE1FF"
+NHL_light_blue <- "#CCF5FF"
+ggplot() + 
+    ggplot2::geom_tile(data = dd, aes(x = x, y = y, fill = goal), alpha = 0.7) +
+    ggplot2::geom_density_2d(data = dd |> tidyr::uncount(goal), ggplot2::aes(x = x, y = y), color = "black", alpha = 0.5) +
+    ggplot2::scale_fill_gradientn(colors = c("#F8766D", "red", "white", "#00BFC4")) +
+    ggplot2::theme_minimal() + 
+    ggplot2::labs(fill = "Number of Goals", x = '', y = '') +
+    ggplot2::theme(axis.text.x = element_blank(), axis.text.y = element_blank()) +
+    ggplot2::coord_cartesian(xlim = c(27, 100)) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(10.92, 11.08, 7.08, 6.92)), fill = NHL_red) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(-10.92, -11.08, -7.08, -6.92)), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 25.5, y = 0, width = 1, height = 85), fill = NHL_blue, alpha = .6) + 
+    ggplot2::geom_tile(aes(x = 89, y = 0, width = 2 / 12, height = 73.50), fill = NHL_red) + 
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5))) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = 14.5, start = pi / 2, end = 0, r = 28)) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = -14.5, start = pi, end = pi / 2, r = 28)) + 
+    ggplot2::geom_tile(aes(x = 90.67, y = 0, width = 3.33, height = 6), fill = "#E5E5E3") + 
+    ggplot2::geom_tile(aes(x = 86.75, y = 0, width = 4.5, height = 8), fill = NHL_light_blue, alpha = .6) +
+    ggforce::geom_arc_bar(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r0 = 4, r = 6), fill = NHL_light_blue, colour = NHL_light_blue, size = 1 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 86.75, y = -4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 86.75, y = 4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggforce::geom_arc(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r = 6), colour = NHL_red, size = 2 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 85, y = 3.75, width = 2 / 12, height = 0.42), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 85, y = -3.75, width = 2 / 12, height = 0.42), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 65, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Top-Right
+    ggplot2::geom_tile(aes(x = 73, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Bottom-Right
+    ggplot2::geom_tile(aes(x = 73, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggforce::geom_circle(aes(x0 = 69, y0 = 22, r = 15), colour = NHL_red, size = 2 / 12) + # Top-Right
+    ggforce::geom_circle(aes(x0 = 69, y0 = -22, r = 15), colour = NHL_red, size = 2 / 12) + # Bottom-Right
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(42.5, 42.5))) + # Top
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(-42.5, -42.5))) + # Bottom
+    ggplot2::geom_line(aes(x = c(-100, -100), y = c(-14.5, 14.5))) + # Left
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5)))
+```
+
+------------------------------------------------------------------------
+
+#### Shot on Goal Made - 2019-2022 {style="text-align: center;"}
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dd <- df |> 
+    dplyr::rename(x = xCordAdjusted, y = yCordAdjusted) |> 
+    dplyr::mutate(grouped_year = ifelse(season %in% c('2007', '2008', '2009', '2010'), '2007-2010', NA),
+                  grouped_year = ifelse(season %in% c('2011', '2012', '2013', '2014'), '2011-2014', grouped_year),
+                  grouped_year = ifelse(season %in% c('2015', '2016', '2017', '2018'), '2015-2018', grouped_year),
+                  grouped_year = ifelse(season %in% c('2019', '2020', '2021', '2022'), '2019-2022', grouped_year),
+                  ) |> 
+    dplyr::filter(grouped_year == '2019-2022') |> 
+    dplyr::group_by(x, y, grouped_year) |> 
+    dplyr::summarise(goal = sum(goal == 1),
+                     n = n(),
+                     .groups = 'drop')
+
+NHL_red <- "#FFCCD8"
+NHL_blue <- "#CCE1FF"
+NHL_light_blue <- "#CCF5FF"
+ggplot() + 
+    ggplot2::geom_tile(data = dd, aes(x = x, y = y, fill = goal), alpha = 0.7) +
+    ggplot2::geom_density_2d(data = dd |> tidyr::uncount(goal), ggplot2::aes(x = x, y = y), color = "black", alpha = 0.5) +
+    ggplot2::scale_fill_gradientn(colors = c("#F8766D", "red", "white", "#00BFC4")) +
+    ggplot2::labs(fill = "Number of Goals", x = '', y = '') +
+    ggplot2::theme(axis.text.x = element_blank(), axis.text.y = element_blank()) +
+    ggplot2::theme_minimal() + 
+    ggplot2::coord_cartesian(xlim = c(27, 100)) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(10.92, 11.08, 7.08, 6.92)), fill = NHL_red) + 
+    ggplot2::geom_polygon(aes(x = c(100, 100, 89, 89), y = c(-10.92, -11.08, -7.08, -6.92)), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 25.5, y = 0, width = 1, height = 85), fill = NHL_blue, alpha = .6) + 
+    ggplot2::geom_tile(aes(x = 89, y = 0, width = 2 / 12, height = 73.50), fill = NHL_red) + 
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5))) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = 14.5, start = pi / 2, end = 0, r = 28)) +
+    ggforce::geom_arc(aes(x0 = 72, y0 = -14.5, start = pi, end = pi / 2, r = 28)) + 
+    ggplot2::geom_tile(aes(x = 90.67, y = 0, width = 3.33, height = 6), fill = "#E5E5E3") + 
+    ggplot2::geom_tile(aes(x = 86.75, y = 0, width = 4.5, height = 8), fill = NHL_light_blue, alpha = .6) +
+    ggforce::geom_arc_bar(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r0 = 4, r = 6), fill = NHL_light_blue, colour = NHL_light_blue, size = 1 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 86.75, y = -4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 86.75, y = 4, width = 4.5, height = 2 / 12), fill = NHL_red) +
+    ggforce::geom_arc(aes(x0 = 89, y0 = 0, start = -atan(4.5 / 4) + 0.01, end = -pi + atan(4.5 / 4) - 0.01, r = 6), colour = NHL_red, size = 2 / 12, alpha = .6) + # manually adjusted arc
+    ggplot2::geom_tile(aes(x = 85, y = 3.75, width = 2 / 12, height = 0.42), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 85, y = -3.75, width = 2 / 12, height = 0.42), fill = NHL_red) + 
+    ggplot2::geom_tile(aes(x = 65, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Top-Right
+    ggplot2::geom_tile(aes(x = 73, y = 22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = 21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = 19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) + # Bottom-Right
+    ggplot2::geom_tile(aes(x = 73, y = -22.83, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 65, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 73, y = -21.17, width = 4, height = 2 / 12), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -24.25, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 66.92, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggplot2::geom_tile(aes(x = 71.08, y = -19.75, width = 2 / 12, height = 3), fill = NHL_red) +
+    ggforce::geom_circle(aes(x0 = 69, y0 = 22, r = 15), colour = NHL_red, size = 2 / 12) + # Top-Right
+    ggforce::geom_circle(aes(x0 = 69, y0 = -22, r = 15), colour = NHL_red, size = 2 / 12) + # Bottom-Right
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(42.5, 42.5))) + # Top
+    ggplot2::geom_line(aes(x = c(-72, 72), y = c(-42.5, -42.5))) + # Bottom
+    ggplot2::geom_line(aes(x = c(-100, -100), y = c(-14.5, 14.5))) + # Left
+    ggplot2::geom_line(aes(x = c(100, 100), y = c(-14.5, 14.5)))
+```
+
+------------------------------------------------------------------------
+
+<div>
+
+### Angle shot attempt {style="text-align: center;"}
+
+</div>
+
+The angle of the shot in degrees. Is a positive number if the shot is from the left side of the ice.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+breakpoints <- seq(-90, 100, by = 10)
+labels <- paste0(seq(-90, 90, by = 10), " - ", seq(-80, 100, by = 10))
+df |> 
+    dplyr::mutate(`Angle Shot Taken` = cut(shotAngle, 
+                                           breaks = breakpoints, 
+                                           labels = labels, 
+                                           right = FALSE,
+                                           include.lowest = TRUE)) |> 
+    dplyr::group_by(`Angle Shot Taken`) |> 
+    dplyr::summarise(Attempt = n(),
+                     Goal = sum(goal == 1),
+                     `Goal %` = Goal / Attempt,
+                     .groups = 'drop') |> 
+    ggplot2::ggplot() + 
+    ggplot2::geom_col(ggplot2::aes(Attempt, `Angle Shot Taken`), color = '#00BFC4', fill = "#00BFC4", alpha = .4) + 
+    ggplot2::theme_bw() + 
+    ggplot2::scale_x_continuous(labels = scales::number)
+```
+
+------------------------------------------------------------------------
+
+<div>
+
+### Angle shot goal {style="text-align: center;"}
+
+</div>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+df %>%
+    dplyr::mutate(`Angle Shot goal` = cut(shotAngle, 
+                             breaks = breakpoints, 
+                             labels = labels, 
+                             right = FALSE,
+                             include.lowest = TRUE)) |> 
+    dplyr::group_by(`Angle Shot goal`) |> 
+    dplyr::summarise(Attempt = n(),
+              Goal = sum(goal == 1),
+              `Goal %` = Goal / Attempt,
+              .groups = 'drop') |> 
+    ggplot2::ggplot() + 
+    ggplot2::geom_col(ggplot2::aes(Goal, `Angle Shot goal`), color = '#00BFC4', fill = "#00BFC4", alpha = .4) + 
+    ggplot2::theme_bw() + 
+    ggplot2::scale_x_continuous(labels = scales::number)
+```
+
+------------------------------------------------------------------------
+
+<div>
+
+### Distance shot attempt {style="text-align: center;"}
+
+</div>
+
+The distance from the net of the shot in feet. Net is defined as being at the (89,0) coordinates.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+df %>%
+    dplyr::mutate(`Distance Shot Taken` = cut(shotDistance, 
+                             breaks = breakpoints, 
+                             labels = labels, 
+                             right = FALSE,
+                             include.lowest = TRUE)) |> 
+    dplyr::group_by(`Distance Shot Taken`) |> 
+    dplyr::summarise(Attempt = n(),
+              Goal = sum(goal == 1),
+              `Goal %` = Goal / Attempt,
+              .groups = 'drop') |> 
+    ggplot2::ggplot() + 
+    ggplot2::geom_col(ggplot2::aes(Attempt, `Distance Shot Taken`), color = '#00BFC4', fill = "#00BFC4", alpha = .4) + 
+    ggplot2::theme_bw() + 
+    ggplot2::scale_x_continuous(labels = scales::number) + 
+    ggplot2::coord_flip()
+```
+
+------------------------------------------------------------------------
+
+<div>
+
+### Distance shot goal {style="text-align: center;"}
+
+</div>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+breakpoints <- seq(0, 100, by = 10)
+
+# Define numeric labels for each interval
+labels <- paste0(seq(0, 90, by = 10), " - ", seq(10, 100, by = 10))
+
+df %>%
+    dplyr::mutate(`Distance Shot Goal` = cut(shotDistance, 
+                             breaks = breakpoints, 
+                             labels = labels, 
+                             right = FALSE,
+                             include.lowest = TRUE)) |> 
+    dplyr::group_by(`Distance Shot Goal`) |> 
+    dplyr::summarise(Attempt = n(),
+              Goal = sum(goal == 1),
+              `Goal %` = Goal / Attempt,
+              .groups = 'drop') |> 
+    ggplot2::ggplot() + 
+    ggplot2::geom_col(ggplot2::aes(Goal, `Distance Shot Goal`), color = '#00BFC4', fill = "#00BFC4", alpha = .4) + 
+    ggplot2::theme_bw() + 
+    ggplot2::scale_x_continuous(labels = scales::number) + 
+    ggplot2::coord_flip()
+```
+
+------------------------------------------------------------------------
+
+### Shooter time on ice {style="text-align: center;"}
+
+Playing time in seconds that have passed since the shooter started their shift.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+df  |> 
+    dplyr::rename(`Shooter Time on Ice` = shooterTimeOnIce) |> 
+    dplyr::group_by(`Shooter Time on Ice`) |> 
+    dplyr::summarise(n = n(), 
+                     goal = sum(goal == 1), 
+                     `Goal Percent` = goal/n,
+              .groups = 'drop') |> 
+    dplyr::filter(goal > 5) |> 
+    ggplot2::ggplot(ggplot2::aes(`Shooter Time on Ice`, `Goal Percent`)) + 
+    ggplot2::geom_point() + 
+    ggplot2::geom_smooth(method = 'lm') + 
+    ggplot2::theme_bw() + 
+    ggplot2::scale_y_continuous(labels = scales::percent)
+```
+
+------------------------------------------------------------------------
+
+<div>
+
+### Shot rebound {style="text-align: center;"}
+
+</div>
+
+The shot is a rebound. (If the last event was a shot and within 3 seconds of this shot).
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+df |> 
+    dplyr::filter(shotRebound == 1) |> 
+    dplyr::summarise(Attempt = n(),
+              Goal = sum(goal == 1),
+              `Goal %` = scales::percent(Goal / Attempt),
+              .groups = 'drop') |> 
+    gt::gt()
+```
+
+------------------------------------------------------------------------
+
+<div>
+
+### Shot Type {style="text-align: center;"}
+
+</div>
+
+Type of the shot. (Slap, Wrist, etc).
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+df |> 
+    dplyr::group_by(shotType) |> 
+    dplyr::summarise(Attempt = n(),
+              Goal = sum(goal == 1),
+              `Goal %` = scales::percent(Goal / Attempt),
+              .groups = 'drop') |> 
+    gt::gt()
+```
+
+------------------------------------------------------------------------
+
+<div>
+
+### Shot hand {style="text-align: center;"}
+
+</div>
+
+Whether the shooter is a left or right shot, L/R.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+df |> 
+    dplyr::group_by(shooterLeftRight) |> 
+    dplyr::summarise(Attempt = n(),
+              Goal = sum(goal == 1),
+              `Goal %` = scales::percent(Goal / Attempt),
+              .groups = 'drop') |> 
+    gt::gt()
+```
+
+------------------------------------------------------------------------
+
+<div>
+
+### Shot Rebound Royal Road {style="text-align: center;"}
+
+</div>
+
+Set to 1 if the puck went through the middle of the between this shot and previous shot if this shot is a rebound.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+df |> 
+    dplyr::group_by(shotAngleReboundRoyalRoad) |> 
+    dplyr::summarise(Attempt = n(),
+              Goal = sum(goal == 1),
+              `Goal %` = scales::percent(Goal / Attempt),
+              .groups = 'drop') |> 
+    gt::gt()
+```
+
+<div>
+
+### Findings {style="text-align: center;"}
+
+</div>
+
+Grouping by years, looking at the heatmaps, proved that shot attempts are starting to either be more creative or intentional. Where the goals made occurring in 2019-2022 there is some spreading deeper into the face-off circles. Having additional data I would theorize we might see it even deeper 2022-2024. The distance has the most goals 10-20 feet off. This brings up another research opportunity of, what does the distance look like when the shot is a rebound? A lot of questions can arise.
+
+To determine the relative importance of the shot characteristics in predicting goals, I employed a random forest model with goal as the target variable. The random forest analysis revealed the impact on the probability of scoring a goal.
+
+<div>
+
+```{r, message=FALSE, warning=FALSE}
+library(randomForest)
+library(dplyr)
+library(caret)
+
+dd <- df |> 
+    dplyr::mutate(dplyr::across(c(shotType, isHomeTeam, shooterLeftRight, shotRush, shotRebound, shotGeneratedRebound, goal), as.factor))
+
+set.seed(123)  
+train_index <- caret::createDataPartition(dd$goal, p = 0.7, list = FALSE)
+train_data <- dd[train_index, ]
+test_data <- dd[-train_index, ]
+
+# Select the features to use in the model
+features <- c("shotType", "isHomeTeam", "xCordAdjusted", "yCordAdjusted", "shotRush", "shotAngle", "shotAnglePlusRebound", "shotAngleReboundRoyalRoad", "shotDistance", "shotRebound", "shotAnglePlusReboundSpeed", "shooterLeftRight", "shooterTimeOnIce", "shotGeneratedRebound")
+
+# Create the formula
+formula <- stats::as.formula(paste("goal ~", paste(features, collapse = " + ")))
+
+# Train the random forest model
+rf_model <- randomForest::randomForest(formula, data = train_data, ntree = 500, importance = TRUE)
+
+# Make predictions on the test set
+predictions <- stats::predict(rf_model, test_data)
+
+# Variable importance
+vip::vip(rf_model)
+
+conf_matrix <- caret::confusionMatrix(predictions, test_data$goal)
+
+print(paste("Model Accuracy:", conf_matrix$overal["Accuracy"]))
+
+print(conf_matrix$table)
+
+```
+
+</div>
+
+<div>
+
+### Applications {style="text-align: center;"}
+
+</div>
+
+Rebounds! After running this I found this article about "Flurry" shots <https://moneypuck.com/about.htm>. There is ample opportunity for additional research which to what I say... Lets go! Lets go deeper, gather more data, utilize some newley found insights in creating practice plans and identifying areas of weakness for our players and the opponents. Find those key metrics that make us say, oh ya, boom!
+
+In a srious note... it is no suprise rebounds are such a high percentage.
+
+<div>
+
+### Limitations {style="text-align: center;"}
+
+</div>
+
+The primary limitation of this analysis is the lack of more comprehensive data, particularly the absence of assist-related information and more focus on the rebounds. Without this contextual data, the model is unable to capture the full complexity of goal-scoring events, which often involve multiple players passing and positoning.
+
+<div>
+
+### Conclusion {style="text-align: center;"}
+
+</div>
+
+This study provided an initial exploration of the factors influencing goal scoring in hockey, but the limitations of the available data and the model's shortcomings highlight the need for further research in this area. Future research should aim to incorporate more comprehensive data, including assist information and potentially even video-based tracking data to gain a deeper understanding of the multifaceted nature of goal-scoring in hockey. Leveraging robust data, researchers can uncover more valuable insights to support the development of effective offensive and defensive strategies, leading to practice planning and game preparation.
